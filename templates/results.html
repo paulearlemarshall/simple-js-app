@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analysis Results for {{ company_name }}</title>
+</head>
+<body>
+    <h1>Results for {{ company_name }}</h1>
+
+    {% if data and data|length > 0 %}
+        {% for process in data %}
+            <h2>{{ process.process_name }}</h2>
+            {% if process.kpis and process.kpis|length > 0 %}
+                <h3>Key Performance Indicators (KPIs)</h3>
+                <ul>
+                    {% for kpi in process.kpis %}
+                        <li>
+                            <strong>{{ kpi.kpi_name }}</strong>
+                            <p>{{ kpi.automation_impact }}</p>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>No KPIs listed for this process.</p>
+            {% endif %}
+        {% endfor %}
+    {% else %}
+        <p>No analysis data to display.</p>
+    {% endif %}
+
+    <a href="{{ url_for('index') }}">Go Back</a>
+</body>
+</html>
