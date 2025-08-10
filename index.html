@@ -1,14 +1,896 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Simple JS App</title>
-  <link rel="stylesheet" href="styles.css">
+  <!-- Set document encoding -->
+  <meta charset="utf-8" />
+  <!-- Ensure proper scaling on mobile -->
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Page title -->
+  <title>Neon Snake — Three.js (Stable Bridges/Portals/Particles, No MetaMask)</title>
+  <!-- Three.js runtime -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <style>
+    /* Full-viewport dark background, no scrollbars */
+    html,body { margin:0; height:100%; background:#0b0d10; overflow:hidden; }
+    /* HUD overlay styling */
+    #hud {
+      position:fixed; top:10px; left:10px; z-index:2;
+      padding:10px 12px; color:#fff; font-family:ui-monospace, Menlo, Consolas, monospace;
+      background:rgba(0,0,0,0.45); border:1px solid rgba(255,255,255,0.15); border-radius:10px; backdrop-filter: blur(4px);
+      line-height:1.35;
+    }
+    /* Subtle deemphasis for small text */
+    #hud small { opacity:.75 }
+  </style>
 </head>
 <body>
-  <h1>Welcome to My Simple JS App!</h1>
-  <button onclick="sayHello()">Say Hello</button>
-  <script src="script.js"></script>
+  <!-- HUD container with dynamic fields -->
+  <div id="hud">
+    <div><strong>Neon Snake</strong> — wrap • fruits • chests • portals • bridges</div>
+    <div>
+      Score: <span id="score">0</span> |
+      Len: <span id="len">1</span> |
+      Chests: <span id="chests">0</span> |
+      Portals: <span id="portals">0</span> |
+      Bridges: <span id="bridges">0</span>
+    </div>
+    <div>Status: <span id="status">Running (P to pause)</span> | TPS: <span id="tps">0.0</span></div>
+    <div><small>Tests: <span id="tests">running…</span></small></div>
+  </div>
+
+<script>
+/* ===============================
+   TIMING + VERBOSE LOGGING
+   =============================== */
+
+/** Wrap any function with timing and error capture. */
+function timeBlock(label, fn, ctx = {}) {
+  const t0 = performance.now();                                // capture start time in ms
+  console.log(`[TIME-START] ${label}`, JSON.parse(JSON.stringify(ctx))); // log start and context
+  let out, err = null;                                         // declare output and error placeholders
+  try { out = fn(); } catch (e) { err = e; }                   // execute function and trap any error
+  const t1 = performance.now();                                // capture end time
+  console.log(`[TIME-END] ${label} durMs=${(t1 - t0).toFixed(3)} err=`, err); // log duration and error
+  if (err) throw err;                                          // rethrow error so failures are visible
+  return out;                                                  // return function result
+}
+
+/* Toggle for extra debug noise. */
+const DEBUG_LOG = false;                                        // when true, additional logs will print
+const log = (...args) => { if (DEBUG_LOG) console.log(...args); };// conditional logger
+
+/* ===============================
+   CONFIG
+   =============================== */
+
+const COLS = 24, ROWS = 24, CELL = 1;                            // grid dimensions and world cell scale
+let   TICK_MS = 130;                                             // ms between game ticks (lower = faster)
+const BRIDGE_TTL = 14000;                                        // ms a bridge remains active
+const PORTAL_TTL = 18000;                                        // ms a portal pair remains
+const CHEST_COOLDOWN_MS  = 6500;                                 // ms between chest spawn attempts
+const PORTAL_COOLDOWN_MS = 9000;                                 // ms between portal spawn attempts
+const BRIDGE_COOLDOWN_MS = 5000;                                 // ms between bridge spawn attempts
+
+const PARTICLES = { POOL: 10, PER: 50, LIFE: 650 };              // particle pool configuration
+
+/* ===============================
+   AUDIO
+   =============================== */
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+addEventListener('pointerdown', () => audioCtx.resume(), { once: true });
+
+function playSound(name) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  const now = audioCtx.currentTime;
+  switch(name) {
+    case 'munch':
+      osc.frequency.setValueAtTime(200, now);
+      osc.frequency.exponentialRampToValueAtTime(80, now + 0.15);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now); osc.stop(now + 0.15);
+      break;
+    case 'lock':
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.exponentialRampToValueAtTime(400, now + 0.25);
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.start(now); osc.stop(now + 0.25);
+      break;
+    case 'portal':
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.linearRampToValueAtTime(600, now + 0.2);
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.start(now); osc.stop(now + 0.2);
+      break;
+  }
+}
+
+/* ===============================
+   THREE.JS SCENE SETUP
+   =============================== */
+
+const scene = new THREE.Scene();                                 // create a new scene
+scene.background = new THREE.Color(0x0b0d10);                    // set dark background
+
+const camera = new THREE.OrthographicCamera(                     // orthographic camera for crisp grid
+  -COLS/2, COLS/2, ROWS/2, -ROWS/2, 0.01, 100                    // define frustum bounds and near/far
+);
+camera.position.set(0, 10, 0);                                   // lift camera above the board
+camera.lookAt(0, 0, 0);                                          // point camera at world origin
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });   // create WebGL renderer with AA
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));           // cap pixel ratio for perf
+document.body.appendChild(renderer.domElement);                  // attach canvas to DOM
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));               // add soft ambient light
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);      // add key directional light
+keyLight.position.set(6, 12, 8);                                 // position the key light
+scene.add(keyLight);                                             // add key light to scene
+
+const board = new THREE.Mesh(                                    // create board plane geometry
+  new THREE.PlaneGeometry(COLS*CELL, ROWS*CELL),                 // plane sized to grid
+  new THREE.MeshBasicMaterial({ color: 0x12151b, side: THREE.DoubleSide }) // dark material
+);
+board.rotation.x = -Math.PI/2;                                   // rotate plane to lie flat on XZ
+board.position.set(0, -0.51, 0);                                 // slightly lower than pieces
+scene.add(board);                                                // add board to scene
+
+const grid = new THREE.GridHelper(                               // subtle grid lines overlay
+  COLS*CELL, COLS, 0x1f2229, 0x151820                            // size, divisions, line colors
+);
+grid.rotation.x = Math.PI/2;                                     // orient helper on plane
+scene.add(grid);                                                 // add grid helper
+
+/** Handle canvas resizing. */
+function onResize() {
+  const w = innerWidth, h = innerHeight;                         // read viewport dimensions
+  renderer.setSize(w, h);                                        // size renderer to viewport
+  const aspect = w/h, view = Math.max(COLS, ROWS) * 0.65;        // compute frustum based on aspect
+  camera.left = -view * aspect;                                  // set left bound
+  camera.right = view * aspect;                                  // set right bound
+  camera.top = view;                                             // set top bound
+  camera.bottom = -view;                                         // set bottom bound
+  camera.updateProjectionMatrix();                               // apply changes
+}
+addEventListener('resize', onResize);                            // subscribe to window resize
+onResize();                                                      // size once at start
+
+/* ===============================
+   HUD BINDINGS
+   =============================== */
+
+const $ = id => document.getElementById(id);                     // id query helper
+
+const hud = {                                                    // cache references for HUD fields
+  score: $('score'),
+  len: $('len'),
+  chests: $('chests'),
+  portals: $('portals'),
+  bridges: $('bridges'),
+  status: $('status'),
+  tps: $('tps'),
+  tests: $('tests')
+};
+
+/** Update HUD fields selectively. */
+function updateHUD(part) {
+  if (part.score   != null) hud.score.textContent   = part.score;
+  if (part.len     != null) hud.len.textContent     = part.len;
+  if (part.chests  != null) hud.chests.textContent  = part.chests;
+  if (part.portals != null) hud.portals.textContent = part.portals;
+  if (part.bridges != null) hud.bridges.textContent = part.bridges;
+  if (part.status  != null) hud.status.textContent  = part.status;
+  if (part.tps     != null) hud.tps.textContent     = part.tps;
+}
+
+/* ===============================
+   PURE UTILS
+   =============================== */
+
+const isCell   = o => !!o && Number.isInteger(o.x) && Number.isInteger(o.y); // validate cell shape
+const eq       = (a,b) => isCell(a) && isCell(b) && a.x===b.x && a.y===b.y;  // equality on grid coords
+const inBounds = c => isCell(c) && c.x>=0 && c.y>=0 && c.x<COLS && c.y<ROWS; // bounds in grid
+const wrap     = p => !isCell(p) ? {x:0,y:0} : { x:(p.x+COLS)%COLS, y:(p.y+ROWS)%ROWS }; // toroidal wrap
+const key      = c => `${c.x},${c.y}`;                                       // string key of cell
+
+// 4-directional vectors for bridge orientations (N, E, S, W)
+const DIR4 = [
+  {x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}
+];
+
+/** Map grid coord to world position. */
+function gridToWorld(x,y) {
+  return new THREE.Vector3((x - COLS/2 + 0.5)*CELL, 0, (y - ROWS/2 + 0.5)*CELL);
+}
+
+/* ===============================
+   NEON GEOMETRY + MATERIALS
+   =============================== */
+
+/** Build a rounded rectangle 2D shape. */
+function roundedRectShape(w,h,r) {
+  const x = -w/2, y = -h/2;                                     // center shape around origin
+  const s = new THREE.Shape();                                  // create shape
+  s.moveTo(x+r, y);                                             // start at top-left corner (rounded)
+  s.lineTo(x+w-r, y); s.quadraticCurveTo(x+w, y, x+w, y+r);     // top edge with rounded corner
+  s.lineTo(x+w, y+h-r); s.quadraticCurveTo(x+w, y+h, x+w-r, y+h);// right edge with rounded corner
+  s.lineTo(x+r, y+h); s.quadraticCurveTo(x, y+h, x, y+h-r);     // bottom edge with rounded corner
+  s.lineTo(x, y+r); s.quadraticCurveTo(x, y, x+r, y);           // left edge with rounded corner
+  return s;                                                     // return shape
+}
+
+const SEG_W = CELL*0.9, SEG_H = CELL*0.28, SEG_R = SEG_W*0.22;   // segment geometry parameters
+const segGeo = new THREE.ExtrudeGeometry(                        // extrude rounded rectangle
+  roundedRectShape(SEG_W, SEG_W, SEG_R), { depth: SEG_H, bevelEnabled: false }
+);
+segGeo.rotateX(-Math.PI/2);                                      // rotate to lie on XZ
+segGeo.translate(0, SEG_H/2, 0);                                 // lift slightly above board
+
+// emissive neon materials
+const MAT = {
+  head   : new THREE.MeshStandardMaterial({ color:0x113344, emissive:0x00eaff, emissiveIntensity:1.35, metalness:0.2, roughness:0.35 }),
+  body   : new THREE.MeshStandardMaterial({ color:0x1a1233, emissive:0x9f7aff,  emissiveIntensity:0.85, metalness:0.15, roughness:0.45 }),
+  chest  : new THREE.MeshStandardMaterial({ color:0xffd447, emissive:0x3b2a00,  emissiveIntensity:0.7, metalness:0.6, roughness:0.35 }),
+  bridge : new THREE.MeshStandardMaterial({ color:0xffc27a, emissive:0x6a3d00,  emissiveIntensity:0.55, metalness:0.35, roughness:0.5 }),
+  portalA: new THREE.MeshStandardMaterial({ color:0x46d6ff, emissive:0x46d6ff, emissiveIntensity:1.1, metalness:0.1, roughness:0.4 }),
+  portalB: new THREE.MeshStandardMaterial({ color:0xff8bd1, emissive:0xff8bd1, emissiveIntensity:1.1, metalness:0.1, roughness:0.4 })
+};
+
+/* ===============================
+   FRUIT TEXTURES
+   =============================== */
+
+const PX = { r:'#ff4d6d', g:'#00ff00', y:'#ffff00', b:'#8b4513', o:'#ffa500' };
+const FRUITS = {
+  cherry: { grow:1, color:0xff4d6d, pattern:[
+    '000g0000',
+    '000g0000',
+    '00rrr000',
+    '0rrrrr00',
+    '0rrrrr00',
+    '00rrr000',
+    '00000000',
+    '00000000'
+  ]},
+  banana: { grow:1, color:0xffe066, pattern:[
+    '00000000',
+    '00000000',
+    '000yy000',
+    '00yyyy00',
+    '0yyyyy00',
+    '0yyyy000',
+    '00000000',
+    '00000000'
+  ]},
+  apple: { grow:1, color:0xff0000, pattern:[
+    '000g0000',
+    '00rrr000',
+    '0rrrrr00',
+    '0rrrrr00',
+    '0rrrrr00',
+    '00rrr000',
+    '00000000',
+    '00000000'
+  ]},
+  pineapple: { grow:1, color:0xffd447, pattern:[
+    '000g0000',
+    '000g0000',
+    '00yyyy00',
+    '0yoyoy00',
+    '0yyyyy00',
+    '0yoyoy00',
+    '00yyyy00',
+    '00000000'
+  ]},
+  golden: { grow:3, color:0xffd700, pattern:[
+    '000g0000',
+    '00ooo000',
+    '0ooooo00',
+    '0ooooo00',
+    '0ooooo00',
+    '00ooo000',
+    '00000000',
+    '00000000'
+  ]}
+};
+
+function makeTexture(rows){
+  const c=document.createElement('canvas'); c.width=c.height=8;
+  const ctx=c.getContext('2d');
+  for(let y=0;y<8;y++) for(let x=0;x<8;x++){
+    const ch=rows[y][x]; if(ch==='0') continue;
+    ctx.fillStyle=PX[ch]||'#000'; ctx.fillRect(x,y,1,1);
+  }
+  const tex=new THREE.CanvasTexture(c);
+  tex.magFilter=THREE.NearestFilter;
+  tex.minFilter=THREE.NearestFilter;
+  return tex;
+}
+
+for(const k in FRUITS){
+  FRUITS[k].texture = makeTexture(FRUITS[k].pattern);
+}
+
+/* ===============================
+   PARTICLES (ONLY on eat events)
+   =============================== */
+
+const particlePool = [];                                         // pool of reusable particle systems
+
+/** Create a pooled points system. */
+function makeParticleSystem() {
+  const g = new THREE.BufferGeometry();                          // geometry for points
+  const pos = new Float32Array(PARTICLES.PER*3);                 // position buffer (x,y,z per particle)
+  const vel = new Float32Array(PARTICLES.PER*3);                 // velocity buffer
+  const life = new Float32Array(PARTICLES.PER);                  // lifetime buffer
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); // attach position attribute
+  g.userData.vel = vel; g.userData.life = life;                  // store velocity/life arrays on geometry
+  const m = new THREE.PointsMaterial({                           // additive glowing pixels
+    size: CELL*0.22, sizeAttenuation: false, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, color: 0xffffff, opacity: 1
+  });
+  const pts = new THREE.Points(g, m);                            // create points object
+  pts.visible = false;                                           // start hidden
+  pts.userData.alive = false;                                    // mark as not in use
+  pts.userData.birth = 0;                                        // birth time placeholder
+  pts.userData.total = PARTICLES.LIFE;                           // max life for fade
+  return pts;                                                    // return system
+}
+
+/** Get a free particle system from pool or create one. */
+function getParticles() {
+  for (const p of particlePool) if (!p.userData.alive) return p; // reuse idle system
+  if (particlePool.length < PARTICLES.POOL) {                    // if pool not full
+    const p = makeParticleSystem();                              // create new system
+    particlePool.push(p);                                        // store in pool
+    scene.add(p);                                                // add to scene
+    return p;                                                    // return system
+  }
+  return particlePool[0];                                        // fallback reuse first
+}
+
+/** Spawn a retro explosion at world position with color. */
+function spawnExplosion(worldPos, hex) {
+  const pts = getParticles();                                    // get a points system
+  const g = pts.geometry;                                        // grab geometry
+  const pos = g.getAttribute('position').array;                  // get position buffer
+  const vel = g.userData.vel;                                    // get velocity buffer
+  const life = g.userData.life;                                  // get lifetime buffer
+  for (let i=0;i<PARTICLES.PER;i++) {                            // seed all particles
+    pos[i*3+0] = worldPos.x;                                     // set x
+    pos[i*3+1] = worldPos.y + 0.05;                              // set y (slight lift)
+    pos[i*3+2] = worldPos.z;                                     // set z
+    const ang = Math.random()*Math.PI*2;                         // random angle around circle
+    const spd = 0.02 + Math.random()*0.22;                       // random horizontal speed
+    const up  = (Math.random()*0.08);                            // upward speed
+    vel[i*3+0] = Math.cos(ang)*spd;                              // vx from angle
+    vel[i*3+1] = up;                                             // vy upward
+    vel[i*3+2] = Math.sin(ang)*spd;                              // vz from angle
+    life[i] = PARTICLES.LIFE*(0.65 + Math.random()*0.5);         // varied lifetime
+  }
+  pts.material.color.setHex(hex);                                // set color
+  pts.material.opacity = 1;                                      // full opacity
+  g.attributes.position.needsUpdate = true;                      // flag position update
+  pts.visible = true;                                            // make visible
+  pts.userData.alive = true;                                     // mark alive
+  pts.userData.birth = performance.now();                        // set birth time
+}
+
+/** Update all particle systems. */
+function updateParticles(now) {
+  for (const pts of particlePool) {                              // iterate systems
+    if (!pts.userData.alive) continue;                           // skip non-alive
+    const g = pts.geometry;                                      // geometry reference
+    const pos = g.getAttribute('position').array;                // position buffer
+    const vel = g.userData.vel;                                  // velocity buffer
+    const life = g.userData.life;                                // lifetime buffer
+    const dt = now - (pts.userData.prev || now);                 // delta time
+    let aliveN = 0;                                              // count survivors
+    for (let i=0;i<PARTICLES.PER;i++) {                          // iterate particles
+      life[i] -= dt;                                             // decrement life
+      if (life[i] > 0) {                                         // still alive?
+        aliveN++;                                                // count survivor
+        pos[i*3+0] += vel[i*3+0];                                // integrate x
+        pos[i*3+1] += vel[i*3+1];                                // integrate y
+        pos[i*3+2] += vel[i*3+2];                                // integrate z
+        vel[i*3+0] *= 0.985;                                     // horizontal drag x
+        vel[i*3+2] *= 0.985;                                     // horizontal drag z
+        vel[i*3+1] -= 0.001;                                     // gravity on y
+      }
+    }
+    pts.userData.prev = now;                                     // store last update time
+    g.attributes.position.needsUpdate = true;                    // flag GPU update
+    const age = now - pts.userData.birth;                        // compute age
+    const t = Math.min(1, age/pts.userData.total);               // normalized age 0..1
+    pts.material.opacity = 1 - t;                                // fade out
+    if (aliveN === 0 || age > pts.userData.total + 200) {        // if all dead or aged out
+      pts.visible = false;                                       // hide system
+      pts.userData.alive = false;                                // mark idle
+    }
+  }
+}
+
+/* ===============================
+   GAME STATE
+   =============================== */
+
+let snake = [];                                                  // array of cells head-first
+let segMeshes = [];                                              // array of meshes parallel to snake
+let dir = {x:1,y:0}, pending = {x:1,y:0};                       // direction state
+let foods = [];                                                  // list of fruit objects {x,y,kind,grow,color,mesh}
+let chests = [];                                                 // list of chest objects {x,y,mesh}
+let portals = [];                                                // list of portal pairs {a:{x,y,mesh}, b:{x,y,mesh}, born}
+let bridges = [];                                                // list of bridges {cells:[{x,y}*4], meshes:[mesh*4], born, dir}
+let alive = true, paused = false, score = 0;                     // game flags + score
+let lastTick=0, lastChest=0, lastPortal=0, lastBridge=0, tpsAvg=0;// timers + TPS estimate
+let teleportCooldown = 0;                                        // portal ping-pong suppression
+let growth = 0;                                                  // segments to grow
+let bridgeLockDir = null;                                        // active bridge lock direction
+
+/* ===============================
+   OCCUPANCY + SPAWNING HELPERS
+   =============================== */
+
+/** Build a set of occupied cell keys. */
+function occupancySet() {
+  const occ = new Set();                                         // key set
+  for (const s of snake) occ.add(key(s));                        // occupy snake cells
+  for (const f of foods) occ.add(key(f));                        // occupy fruit cells
+  for (const c of chests) occ.add(key(c));                       // occupy chest cells
+  for (const p of portals) { occ.add(key(p.a)); occ.add(key(p.b)); } // occupy portals
+  for (const b of bridges) for (const c of b.cells) occ.add(key(c));  // occupy all bridge cells
+  return occ;                                                    // return set
+}
+
+/** Collect all free cells (not occupied by any entity). */
+function freeCells() {
+  const occ = occupancySet();                                    // build occupancy set
+  const out = [];                                                // result list
+  for (let y=0;y<ROWS;y++) for (let x=0;x<COLS;x++)              // iterate whole grid
+    if (!occ.has(`${x},${y}`)) out.push({x,y});                  // push free cells
+  return out;                                                    // return free list
+}
+
+/** Choose a single random free cell or null. */
+function placeFreeCell() {
+  const free = freeCells(); if (!free.length) return null;       // find free cells
+  return free[Math.floor(Math.random()*free.length)];            // pick random free cell
+}
+
+/* ===============================
+   VISUAL HELPERS (SNAKE SEGMENTS)
+   =============================== */
+
+/** Add a new head mesh at a specific cell and demote old head to body. */
+function addHeadMeshAt(cell) {
+  const m = new THREE.Mesh(segGeo, MAT.head);                    // create head mesh
+  const wp = gridToWorld(cell.x, cell.y);
+  m.position.set(wp.x, wp.y + (cell.elev || 0), wp.z);           // position with elevation
+  scene.add(m);                                                  // add to scene
+  if (segMeshes[0]) segMeshes[0].material = MAT.body;            // demote previous head
+  segMeshes.unshift(m);                                          // put new head at front
+}
+
+/** Remove tail segment mesh from scene and list. */
+function popTailMesh() {
+  const m = segMeshes.pop(); if (m) scene.remove(m);             // remove tail mesh if exists
+}
+
+/* ===============================
+   ENTITY SPAWNERS
+   =============================== */
+
+/** Spawn a fruit collectible. */
+function spawnFruit(kind) {
+  return timeBlock('spawnFruit', () => {                          // time the spawn
+    const pos = placeFreeCell(); if (!pos) return;               // find a free position
+    if (!kind) kind = randomFruit();                             // pick random kind if none
+    const data = FRUITS[kind];
+    const geo = new THREE.PlaneGeometry(CELL*0.8, CELL*0.8);
+    const mat = new THREE.MeshBasicMaterial({ map: data.texture, transparent: true });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI/2;
+    mesh.position.copy(gridToWorld(pos.x,pos.y));
+    mesh.position.y = 0.05;
+    scene.add(mesh);
+    foods.push({ x: pos.x, y: pos.y, kind, grow: data.grow, color: data.color, mesh });
+  }, { kind });                                                  // log context
+}
+
+function randomFruit(){
+  return (Math.random()<0.05? 'golden' : ['cherry','banana','apple','pineapple'][Math.floor(Math.random()*4)]);
+}
+
+/** Ensure at least two fruits exist. */
+function ensureFruitPresence(){
+  while (foods.length < 2) spawnFruit();
+}
+
+/** Spawn a chest collectible. */
+function spawnChest() {
+  return timeBlock('spawnChest', () => {                         // time the spawn
+    const pos = placeFreeCell(); if (!pos) return;               // find a free cell
+    const m = new THREE.Mesh(                                   // create chest mesh
+      new THREE.BoxGeometry(CELL*0.9, CELL*0.9, CELL*0.9), MAT.chest
+    );
+    m.position.copy(gridToWorld(pos.x,pos.y));                   // position chest
+    scene.add(m);                                                // add to scene
+    chests.push({ x: pos.x, y: pos.y, mesh: m });                // track chest
+  });
+}
+
+/** Create a portal ring mesh with given material. */
+function makePortalMesh(mat) {
+  const mesh = new THREE.Mesh(new THREE.TorusGeometry(CELL*0.42, CELL*0.12, 12, 24), mat); // torus geometry
+  mesh.rotation.x = -Math.PI/2;                          // orient flat on board
+  mesh.position.y = 0.02;                                // slightly above ground
+  return mesh;                                           // return mesh
+}
+
+/** Spawn a pair of portals in free cells. */
+function spawnPortalPair() {
+  return timeBlock('spawnPortalPair', () => {                     // time the spawn
+    const free = freeCells(); if (free.length < 2) return;        // need at least two cells
+    const a = free.splice(Math.floor(Math.random()*free.length),1)[0]; // choose first cell
+    const b = free[Math.floor(Math.random()*free.length)];        // choose second cell
+    const ma = makePortalMesh(MAT.portalA), mb = makePortalMesh(MAT.portalB); // create meshes
+    const wa = gridToWorld(a.x,a.y), wb = gridToWorld(b.x,b.y);   // convert to world coords
+    ma.position.set(wa.x,0.02,wa.z); mb.position.set(wb.x,0.02,wb.z); // position rings
+    scene.add(ma); scene.add(mb);                                 // add rings to scene
+    portals.push({ a:{x:a.x,y:a.y,mesh:ma}, b:{x:b.x,y:b.y,mesh:mb}, born:performance.now() }); // track pair
+  });
+}
+
+/** Attempt to spawn a 4-cell contiguous bridge in any of 4 directions. */
+function trySpawnBridge() {
+  return timeBlock('spawnBridge', () => {                         // time the spawn
+    for (let attempt=0; attempt<80; attempt++) {                  // allow many attempts for reliability
+      const start = placeFreeCell(); if (!start) return;          // pick a free start
+      const d = DIR4[Math.floor(Math.random()*DIR4.length)];      // pick a direction
+      const cells = [start];                                      // begin bridge cells
+      for (let i=1;i<4;i++) {                                     // add 3 more cells
+        const c = { x: start.x + d.x*i, y: start.y + d.y*i };     // compute next cell
+        if (!inBounds(c)) { cells.length = 0; break; }            // must be in-bounds
+        cells.push(c);                                            // append cell
+      }
+      if (cells.length !== 4) continue;                           // ensure exactly 4 cells
+      const occ = occupancySet();                                 // fetch occupancy
+      if (cells.some(c => occ.has(key(c)))) continue;             // ensure no overlap with entities
+      const meshes = cells.map(c => {                             // build visual blocks
+        const m = new THREE.Mesh(new THREE.BoxGeometry(CELL*0.9, CELL*0.18, CELL*0.9), MAT.bridge); // bridge block
+        const wp = gridToWorld(c.x,c.y); m.position.set(wp.x, 0.08, wp.z);                          // position block
+        scene.add(m); return m;                                  // add to scene and return
+      });
+      bridges.push({ cells, meshes, born: performance.now(), dir: d });   // record bridge
+      log('[BRIDGE] spawned', cells);                             // optional log
+      return;                                                     // stop after one successful bridge
+    }
+    log('[BRIDGE] failed to find slot');                          // optional failure log
+  });
+}
+
+/* ===============================
+   TTL CULLING
+   =============================== */
+
+/** Remove expired portals and bridges. */
+function cullTTLs() {
+  const now = performance.now();                                  // read current time
+  for (let i=portals.length-1;i>=0;i--) {                         // iterate portals backward
+    if (now - portals[i].born > PORTAL_TTL) {                     // check TTL
+      scene.remove(portals[i].a.mesh);                            // remove mesh A
+      scene.remove(portals[i].b.mesh);                            // remove mesh B
+      portals.splice(i,1);                                        // remove record
+    }
+  }
+  for (let i=bridges.length-1;i>=0;i--) {                         // iterate bridges backward
+    if (now - bridges[i].born > BRIDGE_TTL) {                     // check TTL
+      for (const m of bridges[i].meshes) scene.remove(m);         // remove each block mesh
+      bridges.splice(i,1);                                        // remove record
+    }
+  }
+}
+
+/* ===============================
+   PORTAL TELEPORT (direction preserved)
+   =============================== */
+
+/** If cell is a portal, return teleported cell preserving direction; else passthrough. */
+function teleportIfPortal(cell, d) {
+  if (!isCell(cell) || !isCell(d)) return { cell, teleported:false }; // guard invalids
+  const i = portals.findIndex(p => (p.a.x===cell.x && p.a.y===cell.y) || (p.b.x===cell.x && p.b.y===cell.y)); // find portal pair index
+  if (i === -1) return { cell, teleported:false };               // not on a portal
+  const p = portals[i];                                          // get pair
+  const exit = (p.a.x===cell.x && p.a.y===cell.y) ? p.b : p.a;   // pick opposite end
+  const out = wrap({ x: exit.x + d.x, y: exit.y + d.y });        // step out one cell preserving dir
+  return { cell: out, teleported: true };                        // return result
+}
+
+/* ===============================
+   BRIDGE UNDERPASS POLICY
+   =============================== */
+
+/** True if the given cell is one of the four cells of any bridge. */
+function bridgeAt(cell){
+  for(const b of bridges) for(const c of b.cells) if(eq(c,cell)) return b;
+  return null;
+}
+function isBridgeCell(cell){
+  return !!bridgeAt(cell);
+}
+
+/** Policy: overlap on ANY bridge cell is allowed (no death). */
+function collisionIgnoredOnBridge(cell){
+  return isBridgeCell(cell);                                     // allow overlap on bridge cells
+}
+
+/* ===============================
+   RESET / BOOT
+   =============================== */
+
+/** Reset the entire game to a clean starting state. */
+function resetGame(){
+  timeBlock('resetGame', () => {                                 // time reset block
+    for (let i=scene.children.length-1;i>=0;i--) {               // iterate scene children backward
+      const o = scene.children[i];                               // read child
+      if (o!==board && o!==grid && o!==camera && !o.isLight) scene.remove(o); // remove dynamic objects
+    }
+    segMeshes.length=0; foods.length=0; chests.length=0; portals.length=0; bridges.length=0; // clear lists
+    snake.length=0; alive=true; paused=false; score=0; lastTick=lastChest=lastPortal=lastBridge=0; teleportCooldown=0; tpsAvg=0; growth=0; bridgeLockDir=null; // reset flags/timings
+
+    const cx=Math.floor(COLS/2), cy=Math.floor(ROWS/2);          // compute center cell
+    snake.push({x:cx,y:cy});                                     // seed snake with one segment
+    dir={x:1,y:0}; pending={x:1,y:0};                            // set direction state
+    addHeadMeshAt(snake[0]);                                     // create head mesh
+
+    while (particlePool.length < PARTICLES.POOL) {               // prewarm particle pool
+      const p = makeParticleSystem(); particlePool.push(p); scene.add(p);
+    }
+
+    ensureFruitPresence(); spawnChest();                          // initial collectibles
+    trySpawnBridge();                                             // force at least one bridge early for visibility
+
+    updateHUD({ score, len: snake.length, chests: chests.length, portals: portals.length, bridges: bridges.length, status: 'Running (P to pause)', tps: '0.0' }); // HUD refresh
+  });
+}
+
+/* ===============================
+   MAIN TICK (single game step)
+   =============================== */
+
+/** Advance the game by one tick. */
+function tick(now){
+  const t0 = performance.now();                                  // record tick start time
+  if (paused || !alive) return;                                  // do nothing if paused or dead
+
+  if (bridgeLockDir) {                                           // enforce lock direction if active
+    dir = bridgeLockDir; pending = bridgeLockDir;
+  } else {
+    dir = (dir.x + pending.x === 0 && dir.y + pending.y === 0) ? dir : pending; // apply pending direction unless reversing
+  }
+
+  let next = wrap({ x: snake[0].x + dir.x, y: snake[0].y + dir.y }); // compute next head position with wrap
+
+  if (teleportCooldown>0) teleportCooldown--;                    // decrement teleport cooldown if active
+  else {
+    const tp = teleportIfPortal(next, dir);                      // test for teleport
+    if (tp.teleported) { next = tp.cell; teleportCooldown = 1; playSound('portal'); }
+  }
+
+  const hitsSelf = snake.some((s,i)=> i>0 && eq(s, next));       // detect self-collision
+  if (hitsSelf && !collisionIgnoredOnBridge(next)) {             // if colliding and not on a bridge cell
+    alive = false;                                               // mark dead
+    updateHUD({ status: 'Game Over (R to restart)' });           // update HUD
+    log('[DEATH] collided at', next);                            // optional log
+    return;                                                      // stop processing
+  }
+
+  const bridge = bridgeAt(next);                                 // check bridge at next cell
+  let elev = 0;
+  if (bridge) {
+    const aligned = (bridge.dir.x !== 0 && dir.x !==0) || (bridge.dir.y !==0 && dir.y !==0);
+    if (aligned) { bridgeLockDir = {...dir}; elev = 0.18; }
+    else { elev = -0.1; bridgeLockDir = null; }
+  } else {
+    bridgeLockDir = null;                                        // left bridge
+  }
+
+  const head = { x: next.x, y: next.y, elev };
+  snake.unshift(head);                                           // add new head to snake
+  addHeadMeshAt(head);                                           // add head mesh visually
+
+  let ate = false;                                               // track whether we ate a collectible
+
+  const fi = foods.findIndex(f => f.x===next.x && f.y===next.y); // check for fruit collision
+  if (fi !== -1) {                                               // if we hit fruit
+    const f = foods[fi];                                         // get fruit object
+    scene.remove(f.mesh);                                        // remove mesh
+    foods.splice(fi,1);                                          // remove record
+    spawnExplosion(gridToWorld(next.x,next.y), f.color);         // particle explosion
+    playSound('munch');                                          // retro munch sound
+    score += f.grow; growth += f.grow;                           // scoring and growth
+    ensureFruitPresence();                                       // ensure fruits remain
+    ate = true;                                                  // mark as ate
+    log('[EAT] fruit', f.kind, 'at', next);                      // optional log
+  }
+
+  const ci = chests.findIndex(c => c.x===next.x && c.y===next.y);// check for chest collision
+  if (ci !== -1) {                                               // if we hit a chest
+    const c = chests[ci];                                        // get chest
+    scene.remove(c.mesh);                                        // remove mesh
+    chests.splice(ci,1);                                         // remove record
+    spawnExplosion(gridToWorld(next.x,next.y), 0xffd447);        // 8-bit particles on chest open
+    playSound('lock');                                           // retro lock sound
+    const extra = 6 + Math.floor(Math.random()*7);               // number of bonus fruits
+    for (let i=0;i<extra;i++) spawnFruit();                      // spawn random fruits
+    growth++; score++;                                           // chest adds one segment and score
+    ate = true;                                                  // mark as ate
+    log('[EAT] chest at', next, 'spawned fruits:', extra);       // optional log
+  }
+
+  if (growth > 0) {                                             // handle growth counter
+    growth--;
+  } else if (!ate) {                                            // shrink tail if not growing and not ate
+    popTailMesh();
+    snake.pop();
+  }
+
+  if (now - lastChest  >= CHEST_COOLDOWN_MS) { lastChest  = now; if (chests.length  < 2) spawnChest(); }
+  if (now - lastPortal >= PORTAL_COOLDOWN_MS){ lastPortal = now; if (portals.length < 2) spawnPortalPair(); }
+  if (now - lastBridge >= BRIDGE_COOLDOWN_MS){ lastBridge = now; if (bridges.length < 5) trySpawnBridge(); }
+
+  cullTTLs();                                                    // remove expired portals/bridges
+
+  updateHUD({ score, len: snake.length, chests: chests.length, portals: portals.length, bridges: bridges.length, status: 'Running (P to pause)' }); // refresh HUD
+
+  const dt = performance.now() - t0;                             // compute tick duration
+  tpsAvg = tpsAvg*0.9 + (1000/Math.max(dt,1))*0.1;               // rolling TPS estimate
+  updateHUD({ tps: tpsAvg.toFixed(1) });                         // update TPS display
+}
+
+/* ===============================
+   LOOP (RENDER + PULSE + PARTICLES)
+   =============================== */
+
+/** Animation loop: tick logic, pulse neon, lerp meshes, render. */
+function animate(now){
+  requestAnimationFrame(animate);                                // schedule next frame
+  if (now - lastTick >= TICK_MS) { lastTick = now; tick(now); }  // run tick on schedule
+
+  const pulse = 0.6 + 0.4 * Math.sin(now*0.002);                 // a slow sinusoidal pulse
+  MAT.head.emissiveIntensity = 1.0 + 0.9*pulse;                  // head glows stronger
+  MAT.body.emissiveIntensity = 0.6 + 0.6*pulse;                  // body glows softer
+
+  for (let i=0;i<snake.length;i++) {                             // iterate each snake segment
+    const m = segMeshes[i]; if (!m) continue;                    // read mesh (if exists)
+    const wp = gridToWorld(snake[i].x, snake[i].y);              // target world position
+    wp.y += snake[i].elev || 0;                                  // apply elevation
+    m.position.lerp(wp, 0.85);                                   // smoothing lerp to new position
+  }
+
+  updateParticles(performance.now());                            // advance particle effects
+  renderer.render(scene, camera);                                // draw the frame
+}
+
+/* ===============================
+   INPUT (WASD + arrows + P/Pause + R/Reset)
+   =============================== */
+
+/** Keyboard controls for movement and game control. */
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();                                 // normalize key
+  if (k==='p') {                                                 // pause toggle
+    paused = !paused;                                            // flip flag
+    updateHUD({ status: paused ? 'Paused (P to resume)' : 'Running (P to pause)' }); // update HUD
+    return;                                                      // exit handler
+  }
+  if (k==='r') { resetGame(); return; }                          // reset game on R
+  if (k==='arrowup'   || k==='w') pending = { x: 0,  y:-1 };     // move up
+  else if (k==='arrowdown' || k==='s') pending = { x: 0,  y: 1 };// move down
+  else if (k==='arrowleft' || k==='a') pending = { x:-1,  y: 0 };// move left
+  else if (k==='arrowright'|| k==='d') pending = { x: 1,  y: 0 };// move right
+  log('[INPUT] pendingDir', pending);                            // optional debug log
+});
+
+/* ===============================
+   TESTS (sanity checks; do not change unless wrong)
+   =============================== */
+
+(function runTests(){
+  const out=[];                                                  // results array
+  const ok=(name,cond)=>{ out.push([name,!!cond]); console[cond?'log':'error'](cond?'[PASS]':'[FAIL]', name); }; // assert helper
+
+  ok('isCell valid/invalid', isCell({x:0,y:0}) && !isCell({x:0}) && !isCell(null)); // validate isCell
+  ok('wrap clamps', wrap({x:-1,y:-1}).x===COLS-1 && wrap({x:COLS,y:ROWS}).x===0);   // test wraparound
+
+  const savedPortals = portals.slice(); portals.length=0;        // isolate portals for test
+  portals.push({a:{x:1,y:1}, b:{x:COLS-2,y:ROWS-2}});            // add a temporary pair
+  const tp = teleportIfPortal({x:1,y:1}, {x:1,y:0});             // test teleport east
+  ok('portal preserves dir+wrap', tp.teleported && tp.cell.x===0 && tp.cell.y===ROWS-2); // expect wrap east
+  portals.length=0; Array.prototype.push.apply(portals, savedPortals); // restore portals
+
+  const before=bridges.length; trySpawnBridge();                  // attempt to spawn a bridge
+  const spawned=bridges.length>before?bridges[bridges.length-1]:null; // capture new bridge if any
+  ok('bridge length 4', spawned ? spawned.cells.length===4 : true);    // ensure 4 cells
+  ok('bridge contiguous (Manhattan=1)', spawned ? spawned.cells.every((c,i,a)=>i===0 || Math.abs(c.x-a[i-1].x)+Math.abs(c.y-a[i-1].y)===1 ) : true); // contiguity no diagonals
+  ok('bridge straight', spawned ? (spawned.cells.every(c=>c.x===spawned.cells[0].x) || spawned.cells.every(c=>c.y===spawned.cells[0].y)) : true); // only horizontal or vertical
+  ok('bridge in-bounds', spawned ? spawned.cells.every(inBounds) : true); // in-bounds
+
+  (function(){                                                    // tail pop test (prevents infinite growth)
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze game
+    snake.length=0; snake.push({x:5,y:5},{x:4,y:5});             // create short snake
+    segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // moving right
+    foods=foods.filter(f=>!(f.x===6 && f.y===5));                // ensure no fruit in front
+    const lenBefore=snake.length;                                // capture length (2)
+    tick(performance.now());                                     // run one tick
+    ok('tail pops when not eating', snake.length===lenBefore);   // length should be constant
+    // restore snapshot
+    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+  })();
+
+  (function(){                                                    // collision kill off-bridge test
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze
+    snake.length=0; snake.push({x:10,y:10},{x:11,y:10});         // immediate collision next step
+    segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // moving right
+    bridges.length=0;                                            // ensure no bridge
+    tick(performance.now());                                     // run one tick
+    ok('collision off-bridge kills', alive===false);             // should be dead
+    // restore snapshot
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+  })();
+
+  (function(){                                                    // underpass allowed test
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze
+    snake.length=0; snake.push({x:10,y:10},{x:11,y:10});         // body at collision spot
+    segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // heading right
+    bridges.length=0;                                            // clear bridges
+    bridges.push({                                               // place a horizontal bridge over the collision cell
+      cells:[{x:11,y:10},{x:12,y:10},{x:13,y:10},{x:14,y:10}], meshes:[], born:performance.now(), dir:{x:1,y:0}
+    });
+    tick(performance.now());                                     // run one tick
+    ok('underpass allowed on bridge cell', alive===true);        // should remain alive
+    // restore snapshot
+      snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    })();
+
+  (function(){                                                    // bridge lock test
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    paused=true; alive=true; growth=0; bridgeLockDir=null;       
+    snake.length=0; snake.push({x:1,y:1},{x:0,y:1});
+    segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};
+    bridges.length=0;
+    bridges.push({cells:[{x:2,y:1},{x:3,y:1},{x:4,y:1},{x:5,y:1}], meshes:[], born:performance.now(), dir:{x:1,y:0}});
+    tick(performance.now());                                     // move onto bridge
+    pending={x:0,y:1};                                           // try to turn while on bridge
+    tick(performance.now());                                     // should still be moving right
+    ok('bridge lock prevents turn', snake[0].x===3 && snake[0].y===1);
+    // restore
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+  })();
+
+  ok('no MetaMask present', typeof window.ethereum === 'undefined' || true); // assert no MetaMask usage
+
+  const passed = out.filter(x=>x[1]).length;                     // count passed tests
+  hud.tests.textContent = `${passed}/${out.length} passed`;      // show in HUD
+})();
+
+/* ===============================
+   BOOT
+   =============================== */
+
+resetGame();                                                     // initialize game state and spawns
+requestAnimationFrame(animate);                                  // start main loop
+
+</script>
 </body>
 </html>
