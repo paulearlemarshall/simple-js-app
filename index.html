@@ -227,21 +227,45 @@ function roundedRectShape(w,h,r) {
 }
 
 const SEG_W = CELL*0.9, SEG_H = CELL*0.28, SEG_R = SEG_W*0.22;   // segment geometry parameters
-const segGeo = new THREE.ExtrudeGeometry(                        // extrude rounded rectangle
+const bodyGeo = new THREE.ExtrudeGeometry(                       // body rectangle
   roundedRectShape(SEG_W, SEG_W, SEG_R), { depth: SEG_H, bevelEnabled: false }
 );
-segGeo.rotateX(-Math.PI/2);                                      // rotate to lie on XZ
-segGeo.translate(0, SEG_H/2, 0);                                 // lift slightly above board
+bodyGeo.rotateX(-Math.PI/2);
+bodyGeo.translate(0, SEG_H/2, 0);
+
+function pacmanShape(r, mouth){                                  // build pacman sector
+  const s = new THREE.Shape();
+  s.moveTo(0,0);
+  s.absarc(0,0,r,mouth/2, Math.PI*2 - mouth/2, false);
+  return s;
+}
+const headGeo = new THREE.ExtrudeGeometry(pacmanShape(SEG_W/2, Math.PI/3), { depth: SEG_H, bevelEnabled:false });
+headGeo.rotateX(-Math.PI/2);
+headGeo.translate(0, SEG_H/2, 0);
+
+function triangleShape(w){                                       // triangle for tail
+  const s = new THREE.Shape();
+  s.moveTo(-w/2,-w/2);
+  s.lineTo(-w/2,w/2);
+  s.lineTo(w/2,0);
+  s.closePath();
+  return s;
+}
+const tailGeo = new THREE.ExtrudeGeometry(triangleShape(SEG_W), { depth: SEG_H, bevelEnabled:false });
+tailGeo.rotateX(-Math.PI/2);
+tailGeo.translate(0, SEG_H/2, 0);
 
 // emissive neon materials
 const MAT = {
-  head   : new THREE.MeshStandardMaterial({ color:0x113344, emissive:0x00eaff, emissiveIntensity:1.35, metalness:0.2, roughness:0.35 }),
-  body   : new THREE.MeshStandardMaterial({ color:0x1a1233, emissive:0x9f7aff,  emissiveIntensity:0.85, metalness:0.15, roughness:0.45 }),
   chest  : new THREE.MeshStandardMaterial({ color:0xffd447, emissive:0x3b2a00,  emissiveIntensity:0.7, metalness:0.6, roughness:0.35 }),
   bridge : new THREE.MeshStandardMaterial({ color:0xffc27a, emissive:0x6a3d00,  emissiveIntensity:0.55, metalness:0.35, roughness:0.5 }),
   portalA: new THREE.MeshStandardMaterial({ color:0x46d6ff, emissive:0x46d6ff, emissiveIntensity:1.1, metalness:0.1, roughness:0.4 }),
   portalB: new THREE.MeshStandardMaterial({ color:0xff8bd1, emissive:0xff8bd1, emissiveIntensity:1.1, metalness:0.1, roughness:0.4 })
 };
+
+function makeSegMat(hex){                                        // helper to build segment materials
+  return new THREE.MeshStandardMaterial({ color:hex, emissive:hex, emissiveIntensity:0.8, metalness:0.2, roughness:0.4 });
+}
 
 /* ===============================
    FRUIT TEXTURES
@@ -469,18 +493,48 @@ function placeFreeCell() {
    =============================== */
 
 /** Add a new head mesh at a specific cell and demote old head to body. */
-function addHeadMeshAt(cell) {
-  const m = new THREE.Mesh(segGeo, MAT.head);                    // create head mesh
+function addHeadMeshAt(cell, color) {
+  const m = new THREE.Mesh(headGeo, makeSegMat(color));          // create head mesh
   const wp = gridToWorld(cell.x, cell.y);
-  m.position.set(wp.x, wp.y + (cell.elev || 0), wp.z);           // position with elevation
-  scene.add(m);                                                  // add to scene
-  if (segMeshes[0]) segMeshes[0].material = MAT.body;            // demote previous head
-  segMeshes.unshift(m);                                          // put new head at front
+  m.position.set(wp.x, wp.y + (cell.elev || 0), wp.z);
+  scene.add(m);
+  if (segMeshes[0]) segMeshes[0].geometry = bodyGeo;             // convert old head to body
+  segMeshes.unshift(m);
+  orientHead();                                                  // orient new head
+}
+
+function addBodyMeshAt(cell, color){
+  const m = new THREE.Mesh(bodyGeo, makeSegMat(color));
+  const wp = gridToWorld(cell.x, cell.y);
+  m.position.set(wp.x, wp.y + (cell.elev || 0), wp.z);
+  scene.add(m);
+  segMeshes.push(m);
 }
 
 /** Remove tail segment mesh from scene and list. */
 function popTailMesh() {
   const m = segMeshes.pop(); if (m) scene.remove(m);             // remove tail mesh if exists
+}
+
+/** Orient the head wedge to the travel direction. */
+function orientHead(){
+  if (!segMeshes[0]) return;
+  const ang = Math.atan2(dir.y, dir.x);
+  segMeshes[0].rotation.y = -ang;
+}
+
+/** Ensure last segment is a triangular tail pointing backward. */
+function updateTailMesh(){
+  const idx = segMeshes.length-1;
+  const tail = segMeshes[idx];
+  if (!tail) return;
+  tail.geometry = tailGeo;
+  if (snake.length>=2){
+    const prev = snake[idx-1];
+    const curr = snake[idx];
+    const ang = Math.atan2(prev.y - curr.y, prev.x - curr.x);
+    tail.rotation.y = -ang + Math.PI;                              // point opposite travel
+  }
 }
 
 /* ===============================
@@ -513,15 +567,30 @@ function ensureFruitPresence(){
   while (foods.length < 2) spawnFruit();
 }
 
+/** Build an 8-bit style treasure chest mesh. */
+function makeChestMesh(){
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.BoxGeometry(CELL*0.9, CELL*0.5, CELL*0.9),
+    new THREE.MeshStandardMaterial({ color:0x8b4513, metalness:0.2, roughness:0.7 }));
+  base.position.y = CELL*0.25;
+  const lid = new THREE.Mesh(new THREE.BoxGeometry(CELL*0.9, CELL*0.4, CELL*0.9),
+    new THREE.MeshStandardMaterial({ color:0xcc8b3f, metalness:0.2, roughness:0.6 }));
+  lid.position.y = CELL*0.5 + CELL*0.2;
+  const lock = new THREE.Mesh(new THREE.BoxGeometry(CELL*0.2, CELL*0.2, CELL*0.1),
+    new THREE.MeshStandardMaterial({ color:0xffd447, metalness:0.5, roughness:0.3 }));
+  lock.position.set(0, CELL*0.25, CELL*0.45);
+  g.add(base); g.add(lid); g.add(lock);
+  return g;
+}
+
 /** Spawn a chest collectible. */
 function spawnChest() {
   return timeBlock('spawnChest', () => {                         // time the spawn
     const pos = placeFreeCell(); if (!pos) return;               // find a free cell
-    const m = new THREE.Mesh(                                   // create chest mesh
-      new THREE.BoxGeometry(CELL*0.9, CELL*0.9, CELL*0.9), MAT.chest
-    );
-    m.position.copy(gridToWorld(pos.x,pos.y));                   // position chest
-    scene.add(m);                                                // add to scene
+    const m = makeChestMesh();                                   // create 8-bit chest
+    const wp = gridToWorld(pos.x,pos.y);
+    m.position.set(wp.x, 0, wp.z);
+    scene.add(m);
     chests.push({ x: pos.x, y: pos.y, mesh: m });                // track chest
   });
 }
@@ -591,9 +660,12 @@ function cullTTLs() {
     }
   }
   for (let i=bridges.length-1;i>=0;i--) {                         // iterate bridges backward
-    if (now - bridges[i].born > BRIDGE_TTL) {                     // check TTL
-      for (const m of bridges[i].meshes) scene.remove(m);         // remove each block mesh
-      bridges.splice(i,1);                                        // remove record
+    const b = bridges[i];
+    const expired = now - b.born > BRIDGE_TTL;
+    const occupied = snake.some(s => b.cells.some(c => eq(c,s)));
+    if (expired && !occupied) {                                   // remove only if empty
+      for (const m of b.meshes) scene.remove(m);
+      bridges.splice(i,1);
     }
   }
 }
@@ -646,9 +718,11 @@ function resetGame(){
     snake.length=0; alive=true; paused=false; score=0; lastTick=lastChest=lastPortal=lastBridge=0; teleportCooldown=0; tpsAvg=0; growth=0; bridgeLockDir=null; // reset flags/timings
 
     const cx=Math.floor(COLS/2), cy=Math.floor(ROWS/2);          // compute center cell
-    snake.push({x:cx,y:cy});                                     // seed snake with one segment
+    snake.push({x:cx,y:cy,elev:0},{x:cx-1,y:cy,elev:0});         // seed snake with two segments
     dir={x:1,y:0}; pending={x:1,y:0};                            // set direction state
-    addHeadMeshAt(snake[0]);                                     // create head mesh
+    addHeadMeshAt(snake[0], 0xffff00);                           // create head mesh
+    addBodyMeshAt(snake[1], 0xffff00);                           // create tail segment
+    updateTailMesh();
 
     while (particlePool.length < PARTICLES.POOL) {               // prewarm particle pool
       const p = makeParticleSystem(); particlePool.push(p); scene.add(p);
@@ -673,42 +747,47 @@ function tick(now){
   if (bridgeLockDir) {                                           // enforce lock direction if active
     dir = bridgeLockDir; pending = bridgeLockDir;
   } else {
-    dir = (dir.x + pending.x === 0 && dir.y + pending.y === 0) ? dir : pending; // apply pending direction unless reversing
+    dir = (dir.x + pending.x === 0 && dir.y + pending.y === 0) ? dir : pending;
   }
 
-  let next = wrap({ x: snake[0].x + dir.x, y: snake[0].y + dir.y }); // compute next head position with wrap
+  let next = wrap({ x: snake[0].x + dir.x, y: snake[0].y + dir.y });
 
-  if (teleportCooldown>0) teleportCooldown--;                    // decrement teleport cooldown if active
+  if (teleportCooldown>0) teleportCooldown--;
   else {
-    const tp = teleportIfPortal(next, dir);                      // test for teleport
+    const tp = teleportIfPortal(next, dir);
     if (tp.teleported) { next = tp.cell; teleportCooldown = 1; playSound('portal'); }
   }
 
-  const hitsSelf = snake.some((s,i)=> i>0 && eq(s, next));       // detect self-collision
-  if (hitsSelf && !collisionIgnoredOnBridge(next)) {             // if colliding and not on a bridge cell
-    alive = false;                                               // mark dead
-    updateHUD({ status: 'Game Over (R to restart)' });           // update HUD
-    log('[DEATH] collided at', next);                            // optional log
-    return;                                                      // stop processing
+  const hitsSelf = snake.some((s,i)=> i>0 && eq(s, next));
+  if (hitsSelf && !collisionIgnoredOnBridge(next)) {
+    alive = false;
+    updateHUD({ status: 'Game Over (R to restart)' });
+    log('[DEATH] collided at', next);
+    return;
   }
 
-  const bridge = bridgeAt(next);                                 // check bridge at next cell
+  const fi = foods.findIndex(f => f.x===next.x && f.y===next.y); // pre-check fruit
+  const ci = chests.findIndex(c => c.x===next.x && c.y===next.y);// pre-check chest
+  let headColor = segMeshes[0] ? segMeshes[0].material.color.getHex() : 0xffff00;
+  if (fi !== -1) headColor = foods[fi].color;
+  else if (ci !== -1) headColor = 0xffd447;
+
+  const bridge = bridgeAt(next);
   let elev = 0;
   if (bridge) {
     const aligned = (bridge.dir.x !== 0 && dir.x !==0) || (bridge.dir.y !==0 && dir.y !==0);
     if (aligned) { bridgeLockDir = {...dir}; elev = 0.18; }
     else { elev = -0.1; bridgeLockDir = null; }
   } else {
-    bridgeLockDir = null;                                        // left bridge
+    bridgeLockDir = null;
   }
 
   const head = { x: next.x, y: next.y, elev };
-  snake.unshift(head);                                           // add new head to snake
-  addHeadMeshAt(head);                                           // add head mesh visually
+  snake.unshift(head);
+  addHeadMeshAt(head, headColor);                                // add head with color
 
   let ate = false;                                               // track whether we ate a collectible
 
-  const fi = foods.findIndex(f => f.x===next.x && f.y===next.y); // check for fruit collision
   if (fi !== -1) {                                               // if we hit fruit
     const f = foods[fi];                                         // get fruit object
     scene.remove(f.mesh);                                        // remove mesh
@@ -721,7 +800,6 @@ function tick(now){
     log('[EAT] fruit', f.kind, 'at', next);                      // optional log
   }
 
-  const ci = chests.findIndex(c => c.x===next.x && c.y===next.y);// check for chest collision
   if (ci !== -1) {                                               // if we hit a chest
     const c = chests[ci];                                        // get chest
     scene.remove(c.mesh);                                        // remove mesh
@@ -741,6 +819,7 @@ function tick(now){
     popTailMesh();
     snake.pop();
   }
+  updateTailMesh();
 
   if (now - lastChest  >= CHEST_COOLDOWN_MS) { lastChest  = now; if (chests.length  < 2) spawnChest(); }
   if (now - lastPortal >= PORTAL_COOLDOWN_MS){ lastPortal = now; if (portals.length < 2) spawnPortalPair(); }
@@ -765,8 +844,7 @@ function animate(now){
   if (now - lastTick >= TICK_MS) { lastTick = now; tick(now); }  // run tick on schedule
 
   const pulse = 0.6 + 0.4 * Math.sin(now*0.002);                 // a slow sinusoidal pulse
-  MAT.head.emissiveIntensity = 1.0 + 0.9*pulse;                  // head glows stronger
-  MAT.body.emissiveIntensity = 0.6 + 0.6*pulse;                  // body glows softer
+  for (const m of segMeshes) m.material.emissiveIntensity = 0.6 + 0.6*pulse;
 
   for (let i=0;i<snake.length;i++) {                             // iterate each snake segment
     const m = segMeshes[i]; if (!m) continue;                    // read mesh (if exists)
