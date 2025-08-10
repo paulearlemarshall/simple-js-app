@@ -74,6 +74,45 @@ const BRIDGE_COOLDOWN_MS = 5000;                                 // ms between b
 const PARTICLES = { POOL: 10, PER: 50, LIFE: 650 };              // particle pool configuration
 
 /* ===============================
+   AUDIO
+   =============================== */
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+addEventListener('pointerdown', () => audioCtx.resume(), { once: true });
+
+function playSound(name) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  const now = audioCtx.currentTime;
+  switch(name) {
+    case 'munch':
+      osc.frequency.setValueAtTime(200, now);
+      osc.frequency.exponentialRampToValueAtTime(80, now + 0.15);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now); osc.stop(now + 0.15);
+      break;
+    case 'lock':
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.exponentialRampToValueAtTime(400, now + 0.25);
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.start(now); osc.stop(now + 0.25);
+      break;
+    case 'portal':
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.linearRampToValueAtTime(600, now + 0.2);
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.start(now); osc.stop(now + 0.2);
+      break;
+  }
+}
+
+/* ===============================
    THREE.JS SCENE SETUP
    =============================== */
 
@@ -161,10 +200,9 @@ const inBounds = c => isCell(c) && c.x>=0 && c.y>=0 && c.x<COLS && c.y<ROWS; // 
 const wrap     = p => !isCell(p) ? {x:0,y:0} : { x:(p.x+COLS)%COLS, y:(p.y+ROWS)%ROWS }; // toroidal wrap
 const key      = c => `${c.x},${c.y}`;                                       // string key of cell
 
-// 8-directional vectors for bridge orientations (N, NE, E, SE, S, SW, W, NW)
-const DIR8 = [
-  {x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1},
-  {x:1,y:1},{x:1,y:-1},{x:-1,y:1},{x:-1,y:-1}
+// 4-directional vectors for bridge orientations (N, E, S, W)
+const DIR4 = [
+  {x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}
 ];
 
 /** Map grid coord to world position. */
@@ -221,8 +259,9 @@ function makeParticleSystem() {
   const life = new Float32Array(PARTICLES.PER);                  // lifetime buffer
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); // attach position attribute
   g.userData.vel = vel; g.userData.life = life;                  // store velocity/life arrays on geometry
-  const m = new THREE.PointsMaterial({                           // additive glowing points
-    size: CELL*0.22, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffffff, opacity: 1
+  const m = new THREE.PointsMaterial({                           // additive glowing pixels
+    size: CELL*0.22, sizeAttenuation: false, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, color: 0xffffff, opacity: 1
   });
   const pts = new THREE.Points(g, m);                            // create points object
   pts.visible = false;                                           // start hidden
@@ -426,12 +465,12 @@ function spawnPortalPair() {
   });
 }
 
-/** Attempt to spawn a 4-cell contiguous bridge in any of 8 directions. */
+/** Attempt to spawn a 4-cell contiguous bridge in any of 4 directions. */
 function trySpawnBridge() {
   return timeBlock('spawnBridge', () => {                         // time the spawn
     for (let attempt=0; attempt<80; attempt++) {                  // allow many attempts for reliability
       const start = placeFreeCell(); if (!start) return;          // pick a free start
-      const d = DIR8[Math.floor(Math.random()*DIR8.length)];      // pick a direction
+      const d = DIR4[Math.floor(Math.random()*DIR4.length)];      // pick a direction
       const cells = [start];                                      // begin bridge cells
       for (let i=1;i<4;i++) {                                     // add 3 more cells
         const c = { x: start.x + d.x*i, y: start.y + d.y*i };     // compute next cell
@@ -552,7 +591,7 @@ function tick(now){
   if (teleportCooldown>0) teleportCooldown--;                    // decrement teleport cooldown if active
   else {                                                         // otherwise consider portal teleport
     const tp = teleportIfPortal(next, dir);                      // test for teleport
-    if (tp.teleported) { next = tp.cell; teleportCooldown = 1; } // apply teleport and set cooldown
+    if (tp.teleported) { next = tp.cell; teleportCooldown = 1; playSound('portal'); } // apply teleport, set cooldown, play sound
   }
 
   const hitsSelf = snake.some((s,i)=> i>0 && eq(s, next));       // detect self-collision
@@ -573,7 +612,8 @@ function tick(now){
     const f = foods[fi];                                         // get food object
     scene.remove(f.mesh);                                        // remove food mesh
     foods.splice(fi,1);                                          // remove food record
-    spawnExplosion(gridToWorld(next.x,next.y), f.kind==='X' ? 0xff4d6d : 0x7aa2ff); // particles ONLY on eat
+    spawnExplosion(gridToWorld(next.x,next.y), f.kind==='X' ? 0xff4d6d : 0x7aa2ff); // 8-bit particles on eat
+    playSound('munch');                                          // retro munch sound
     if (f.kind==='X') score++;                                   // X grows snake (no tail pop)
     else { score = Math.max(0, score-1); if (snake.length>1) { popTailMesh(); snake.pop(); } } // O shrinks by popping tail
     ensureFoodPresence();                                        // make sure both kinds remain available
@@ -586,7 +626,8 @@ function tick(now){
     const c = chests[ci];                                        // get chest
     scene.remove(c.mesh);                                        // remove mesh
     chests.splice(ci,1);                                         // remove record
-    spawnExplosion(gridToWorld(next.x,next.y), 0xffd447);        // particles ONLY on eat
+    spawnExplosion(gridToWorld(next.x,next.y), 0xffd447);        // 8-bit particles on chest open
+    playSound('lock');                                           // retro lock sound
     const extra = 6 + Math.floor(Math.random()*7);               // number of bonus foods
     for (let i=0;i<extra;i++) spawnFood(Math.random()<0.55 ? 'X' : 'O'); // spawn random foods
     ate = true;                                                  // mark as ate
@@ -674,7 +715,8 @@ addEventListener('keydown', e => {
   const before=bridges.length; trySpawnBridge();                  // attempt to spawn a bridge
   const spawned=bridges.length>before?bridges[bridges.length-1]:null; // capture new bridge if any
   ok('bridge length 4', spawned ? spawned.cells.length===4 : true);    // ensure 4 cells
-  ok('bridge contiguous (Chebyshev=1)', spawned ? spawned.cells.every((c,i,a)=>i===0 || Math.max(Math.abs(c.x-a[i-1].x), Math.abs(c.y-a[i-1].y))===1 ) : true); // contiguity
+  ok('bridge contiguous (Manhattan=1)', spawned ? spawned.cells.every((c,i,a)=>i===0 || Math.abs(c.x-a[i-1].x)+Math.abs(c.y-a[i-1].y)===1 ) : true); // contiguity no diagonals
+  ok('bridge straight', spawned ? (spawned.cells.every(c=>c.x===spawned.cells[0].x) || spawned.cells.every(c=>c.y===spawned.cells[0].y)) : true); // only horizontal or vertical
   ok('bridge in-bounds', spawned ? spawned.cells.every(inBounds) : true); // in-bounds
 
   (function(){                                                    // tail pop test (prevents infinite growth)
