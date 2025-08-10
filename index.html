@@ -457,6 +457,7 @@ let lastTick=0, lastChest=0, lastPortal=0, lastBridge=0, tpsAvg=0;// timers + TP
 let teleportCooldown = 0;                                        // portal ping-pong suppression
 let growth = 0;                                                  // segments to grow
 let bridgeLockDir = null;                                        // active bridge lock direction
+let colorQueue = [];                                             // queued colors for new segments
 
 /* ===============================
    OCCUPANCY + SPAWNING HELPERS
@@ -703,6 +704,20 @@ function collisionIgnoredOnBridge(cell){
   return isBridgeCell(cell);                                     // allow overlap on bridge cells
 }
 
+/** Recompute elevation for all snake segments based on bridge positions. */
+function updateElevations(){
+  for(let i=0;i<snake.length;i++){
+    const b = bridgeAt(snake[i]);
+    if(b){
+      const segDir = (i===0) ? dir : { x: snake[i-1].x - snake[i].x, y: snake[i-1].y - snake[i].y };
+      const aligned = (b.dir.x !==0 && segDir.x !==0) || (b.dir.y !==0 && segDir.y !==0);
+      snake[i].elev = aligned ? 0.18 : -0.1;
+    }else{
+      snake[i].elev = 0;
+    }
+  }
+}
+
 /* ===============================
    RESET / BOOT
    =============================== */
@@ -715,7 +730,7 @@ function resetGame(){
       if (o!==board && o!==grid && o!==camera && !o.isLight) scene.remove(o); // remove dynamic objects
     }
     segMeshes.length=0; foods.length=0; chests.length=0; portals.length=0; bridges.length=0; // clear lists
-    snake.length=0; alive=true; paused=false; score=0; lastTick=lastChest=lastPortal=lastBridge=0; teleportCooldown=0; tpsAvg=0; growth=0; bridgeLockDir=null; // reset flags/timings
+    snake.length=0; alive=true; paused=false; score=0; lastTick=lastChest=lastPortal=lastBridge=0; teleportCooldown=0; tpsAvg=0; growth=0; bridgeLockDir=null; colorQueue.length=0; // reset flags/timings
 
     const cx=Math.floor(COLS/2), cy=Math.floor(ROWS/2);          // compute center cell
     snake.push({x:cx,y:cy,elev:0},{x:cx-1,y:cy,elev:0});         // seed snake with two segments
@@ -784,7 +799,6 @@ function tick(now){
   addHeadMeshAt(head, 0xffff00);                                 // head always yellow
 
   let ate = false;                                               // track whether we ate a collectible
-  let colorToApply = null;                                       // pending body color
 
   if (fi !== -1) {                                               // if we hit fruit
     const f = foods[fi];                                         // get fruit object
@@ -794,7 +808,7 @@ function tick(now){
     playSound('munch');                                          // retro munch sound
     score += f.grow; growth += f.grow;                           // scoring and growth
     ensureFruitPresence();                                       // ensure fruits remain
-    colorToApply = f.color;                                      // next segment adopts fruit color
+    for(let i=0;i<f.grow;i++) colorQueue.push(f.color);          // queue colors for growth
     ate = true;                                                  // mark as ate
     log('[EAT] fruit', f.kind, 'at', next);                      // optional log
   }
@@ -808,22 +822,23 @@ function tick(now){
     const extra = 6 + Math.floor(Math.random()*7);               // number of bonus fruits
     for (let i=0;i<extra;i++) spawnFruit();                      // spawn random fruits
     growth++; score++;                                           // chest adds one segment and score
-    colorToApply = 0xffd447;                                     // next segment adopts chest color
+    colorQueue.push(0xffd447);                                   // queue chest color
     ate = true;                                                  // mark as ate
     log('[EAT] chest at', next, 'spawned fruits:', extra);       // optional log
   }
 
-  if (colorToApply !== null && segMeshes[1]) {                   // apply pending color once
-    segMeshes[1].material = makeSegMat(colorToApply);
-  }
-
   if (growth > 0) {                                             // handle growth counter
+    if(colorQueue.length){
+      const tail = segMeshes[segMeshes.length-1];
+      tail.material = makeSegMat(colorQueue.shift());
+    }
     growth--;
   } else if (!ate) {                                            // shrink tail if not growing and not ate
     popTailMesh();
     snake.pop();
   }
   updateTailMesh();
+  updateElevations();
 
   if (now - lastChest  >= CHEST_COOLDOWN_MS) { lastChest  = now; if (chests.length  < 2) spawnChest(); }
   if (now - lastPortal >= PORTAL_COOLDOWN_MS){ lastPortal = now; if (portals.length < 2) spawnPortalPair(); }
@@ -906,7 +921,7 @@ addEventListener('keydown', e => {
   ok('bridge in-bounds', spawned ? spawned.cells.every(inBounds) : true); // in-bounds
 
   (function(){                                                    // tail pop test (prevents infinite growth)
-    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir, colorQueue:colorQueue.slice()};
     paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze game
     snake.length=0; snake.push({x:5,y:5},{x:4,y:5});             // create short snake
     segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // moving right
@@ -915,11 +930,11 @@ addEventListener('keydown', e => {
     tick(performance.now());                                     // run one tick
     ok('tail pops when not eating', snake.length===lenBefore);   // length should be constant
     // restore snapshot
-    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir; colorQueue=save.colorQueue;
   })();
 
   (function(){                                                    // collision kill off-bridge test
-    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir, colorQueue:colorQueue.slice()};
     paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze
     snake.length=0; snake.push({x:10,y:10},{x:11,y:10});         // immediate collision next step
     segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // moving right
@@ -927,11 +942,11 @@ addEventListener('keydown', e => {
     tick(performance.now());                                     // run one tick
     ok('collision off-bridge kills', alive===false);             // should be dead
     // restore snapshot
-    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir; colorQueue=save.colorQueue;
   })();
 
   (function(){                                                    // underpass allowed test
-    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir, colorQueue:colorQueue.slice()};
     paused=true; alive=true; growth=0; bridgeLockDir=null;       // freeze
     snake.length=0; snake.push({x:10,y:10},{x:11,y:10});         // body at collision spot
     segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};        // heading right
@@ -942,26 +957,28 @@ addEventListener('keydown', e => {
     tick(performance.now());                                     // run one tick
     ok('underpass allowed on bridge cell', alive===true);        // should remain alive
     // restore snapshot
-    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir; colorQueue=save.colorQueue;
   })();
 
-  (function(){                                                    // color only next segment test
-    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), chests:JSON.parse(JSON.stringify(chests)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
-    paused=true; alive=true; growth=0; bridgeLockDir=null;
+  (function(){                                                    // color applies to new tail segment
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), chests:JSON.parse(JSON.stringify(chests)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir, colorQueue:colorQueue.slice()};
+    paused=true; alive=true; growth=0; bridgeLockDir=null; colorQueue=[];
     snake.length=0; snake.push({x:5,y:5},{x:4,y:5});
     segMeshes.length=0;
-    addHeadMeshAt(snake[0], 0xffff00); addBodyMeshAt(snake[1], 0xffff00); updateTailMesh();
+    addHeadMeshAt(snake[0], 0xffff00); addBodyMeshAt(snake[1], 0xffff00); updateTailMesh(); updateElevations();
     dir={x:1,y:0}; pending={x:1,y:0};
     foods=[{x:6,y:5,kind:'test',grow:1,color:0x123456,mesh:new THREE.Mesh()}];
     scene.add(foods[0].mesh);
-    tick(performance.now());
-    ok('fruit color only next segment', segMeshes[0].material.color.getHex()===0xffff00 && segMeshes[1].material.color.getHex()===0x123456);
+    tick(performance.now());                                     // eat fruit
+    pending={x:1,y:0};
+    tick(performance.now());                                     // grow and color tail
+    ok('fruit color new tail segment', segMeshes[segMeshes.length-1].material.color.getHex()===0x123456);
     scene.remove(foods[0].mesh);
-    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; chests=save.chests; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; chests=save.chests; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir; colorQueue=save.colorQueue;
   })();
 
   (function(){                                                    // bridge lock test
-    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir, colorQueue:colorQueue.slice()};
     paused=true; alive=true; growth=0; bridgeLockDir=null;       
     snake.length=0; snake.push({x:1,y:1},{x:0,y:1});
     segMeshes.length=0; dir={x:1,y:0}; pending={x:1,y:0};
@@ -972,7 +989,7 @@ addEventListener('keydown', e => {
     tick(performance.now());                                     // should still be moving right
     ok('bridge lock prevents turn', snake[0].x===3 && snake[0].y===1);
     // restore
-    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir; colorQueue=save.colorQueue;
   })();
 
   ok('no MetaMask present', typeof window.ethereum === 'undefined' || true); // assert no MetaMask usage
