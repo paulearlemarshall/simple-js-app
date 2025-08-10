@@ -768,9 +768,6 @@ function tick(now){
 
   const fi = foods.findIndex(f => f.x===next.x && f.y===next.y); // pre-check fruit
   const ci = chests.findIndex(c => c.x===next.x && c.y===next.y);// pre-check chest
-  let headColor = segMeshes[0] ? segMeshes[0].material.color.getHex() : 0xffff00;
-  if (fi !== -1) headColor = foods[fi].color;
-  else if (ci !== -1) headColor = 0xffd447;
 
   const bridge = bridgeAt(next);
   let elev = 0;
@@ -784,9 +781,10 @@ function tick(now){
 
   const head = { x: next.x, y: next.y, elev };
   snake.unshift(head);
-  addHeadMeshAt(head, headColor);                                // add head with color
+  addHeadMeshAt(head, 0xffff00);                                 // head always yellow
 
   let ate = false;                                               // track whether we ate a collectible
+  let colorToApply = null;                                       // pending body color
 
   if (fi !== -1) {                                               // if we hit fruit
     const f = foods[fi];                                         // get fruit object
@@ -796,6 +794,7 @@ function tick(now){
     playSound('munch');                                          // retro munch sound
     score += f.grow; growth += f.grow;                           // scoring and growth
     ensureFruitPresence();                                       // ensure fruits remain
+    colorToApply = f.color;                                      // next segment adopts fruit color
     ate = true;                                                  // mark as ate
     log('[EAT] fruit', f.kind, 'at', next);                      // optional log
   }
@@ -809,8 +808,13 @@ function tick(now){
     const extra = 6 + Math.floor(Math.random()*7);               // number of bonus fruits
     for (let i=0;i<extra;i++) spawnFruit();                      // spawn random fruits
     growth++; score++;                                           // chest adds one segment and score
+    colorToApply = 0xffd447;                                     // next segment adopts chest color
     ate = true;                                                  // mark as ate
     log('[EAT] chest at', next, 'spawned fruits:', extra);       // optional log
+  }
+
+  if (colorToApply !== null && segMeshes[1]) {                   // apply pending color once
+    segMeshes[1].material = makeSegMat(colorToApply);
   }
 
   if (growth > 0) {                                             // handle growth counter
@@ -938,8 +942,23 @@ addEventListener('keydown', e => {
     tick(performance.now());                                     // run one tick
     ok('underpass allowed on bridge cell', alive===true);        // should remain alive
     // restore snapshot
-      snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
-    })();
+    snake=save.snake; segMeshes=save.segMeshes; bridges=save.bridges; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+  })();
+
+  (function(){                                                    // color only next segment test
+    const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), foods:JSON.parse(JSON.stringify(foods)), chests:JSON.parse(JSON.stringify(chests)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
+    paused=true; alive=true; growth=0; bridgeLockDir=null;
+    snake.length=0; snake.push({x:5,y:5},{x:4,y:5});
+    segMeshes.length=0;
+    addHeadMeshAt(snake[0], 0xffff00); addBodyMeshAt(snake[1], 0xffff00); updateTailMesh();
+    dir={x:1,y:0}; pending={x:1,y:0};
+    foods=[{x:6,y:5,kind:'test',grow:1,color:0x123456,mesh:new THREE.Mesh()}];
+    scene.add(foods[0].mesh);
+    tick(performance.now());
+    ok('fruit color only next segment', segMeshes[0].material.color.getHex()===0xffff00 && segMeshes[1].material.color.getHex()===0x123456);
+    scene.remove(foods[0].mesh);
+    snake=save.snake; segMeshes=save.segMeshes; foods=save.foods; chests=save.chests; alive=save.alive; paused=save.paused; dir=save.dir; pending=save.pending; growth=save.growth; bridgeLockDir=save.bridgeLockDir;
+  })();
 
   (function(){                                                    // bridge lock test
     const save={snake:JSON.parse(JSON.stringify(snake)), segMeshes:segMeshes.slice(), bridges:JSON.parse(JSON.stringify(bridges)), alive, paused, dir:{...dir}, pending:{...pending}, growth, bridgeLockDir};
